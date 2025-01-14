@@ -261,7 +261,11 @@ void *test_cdma_ptop_transfer_mutithread(void *arg) {
   struct timespec tp;
   bm_device_mem_t dev_buffer_src, dev_buffer_dst;
   u64 src, dst;
-
+    unsigned long consume_sys = 0;
+    unsigned long consume = 0;
+    struct timeval tv_start;
+    struct timeval tv_end;
+    struct timeval timediff;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID,&tp);
   srand(tp.tv_nsec);
 
@@ -303,12 +307,12 @@ void *test_cdma_ptop_transfer_mutithread(void *arg) {
   } else {
       dev_buffer_src = bm_mem_from_device(src_addr, transfer_size);
   }
-
   ret = bm_memcpy_s2d(handle_src, dev_buffer_src, sys_send_buffer);
   if (ret != BM_SUCCESS) {
     printf("CDMA transfer from system to device failed, ret = %d\n", ret);
     return NULL;
   }
+// ######################################
 
   ret = bm_dev_request(&handle_dst, dst_num);
 
@@ -321,8 +325,21 @@ void *test_cdma_ptop_transfer_mutithread(void *arg) {
   } else {
       dev_buffer_dst = bm_mem_from_device(dst_addr, transfer_size);
   }
-
+  gettimeofday(&tv_start, NULL);
   ret = bm_memcpy_p2p(handle_src, dev_buffer_src, handle_dst, dev_buffer_dst);
+  gettimeofday(&tv_end, NULL);
+  timersub(&tv_end, &tv_start, &timediff);
+  consume = timediff.tv_sec * 1000000 + timediff.tv_usec;
+  consume_sys += consume;
+    consume = consume_sys / 8;
+    if (consume > 0) {
+    float bandwidth = (float)transfer_size / (1024.0*1024.0) / (consume / 1000000.0);
+    printf("multithread P2P sys:Transfer size:0x%x byte. Cost time:%ld us, Bandwidth:%.2f MB/s\n",
+            transfer_size,
+            consume,
+            bandwidth);
+    }
+
   if (ret != BM_SUCCESS) {
     printf("CDMA transfer p2p failed, ret = %d\n", ret);
     return NULL;

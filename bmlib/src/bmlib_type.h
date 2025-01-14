@@ -30,7 +30,9 @@ void print_trace(void);
                 #define hang(_ret) while (1)
         #endif
 #else
+#ifndef hang
 #define hang(_ret) exit(_ret)
+#endif
 #endif
 
 #ifdef NO_PRINTF_IN_ASSERT
@@ -41,6 +43,7 @@ void print_trace(void);
     }                                \
   } while (0)
 #else
+#ifndef ASSERT_INFO
 #define ASSERT_INFO(_cond, fmt, ...)                                           \
   do {                                                                         \
     if (!(_cond)) {                                                            \
@@ -50,11 +53,14 @@ void print_trace(void);
     }                                                                          \
   } while (0)
 #endif
+#endif
 
 #define ASSERT(_cond) ASSERT_INFO(_cond, "none.")
 
+#ifndef ASSERT_RANGE
 #define ASSERT_RANGE(val, min, max) \
   ASSERT_INFO((val) >= (min) && (val) <= (max), #val "=%d must be in [%d, %d]", (val), (min), (max))
+#endif
 
 #define INLINE inline
 
@@ -62,8 +68,9 @@ void print_trace(void);
 
 #define __ALIGN_MASK(x, mask) (((x) + (mask)) & ~(mask))
 //#define ALIGN(x, a) __ALIGN_MASK(x, (__typeof__(x))(a)-1)
+#ifndef ALIGN
 #define ALIGN(x, a) __ALIGN_MASK(x, (int)(a)-1)
-
+#endif
 #define ALIGN_SHIFT(x, s) (ALIGN(x, (1 << (s))))
 #define NUM_ALIGN_SHFIT(x, s) (ALIGN_SHIFT((x), (s)) >> (s))
 

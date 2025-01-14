@@ -7,12 +7,12 @@
 #include "bmlib_internal.h"
 #include "string.h"
 
-#ifdef WIN32
-#include <io.h>
-#include <time.h>
-#else
+#ifdef __linux__
 #include <unistd.h>
 #include <sys/time.h>
+#else
+#include <io.h>
+#include <time.h>
 #endif
 
 

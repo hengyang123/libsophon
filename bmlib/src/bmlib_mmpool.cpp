@@ -12,7 +12,6 @@ void mem_pool_init(mem_pool_t *pool) {
   P->slot_avail.push_back(make_pair(0, pool->total_size));
 }
 */
-#define GLOBAL_MEM_START_ADDR 0x100000000
 /* look for the smallest yet sufficient memory slot for the demanding size */
 static pool_addr_t find_slot(struct pool_struct *P, pool_size_t size) {
   ASSERT(size % MIN_SLOT_SIZE == 0);
@@ -47,7 +46,7 @@ static pool_addr_t find_slot(struct pool_struct *P, pool_size_t size) {
   return addr;
 }
 
-pool_addr_t bm_mem_pool::bm_mem_pool_alloc(pool_addr_t size) {
+pool_addr_t bm_mem_pool::bm_mem_pool_alloc(pool_size_t size) {
   struct pool_struct *P = &_mem_pool_list[0];
   pthread_mutex_lock(&P->mem_pool_lock);
   ASSERT(P->num_slots_in_use < MEM_POOL_SLOT_NUM);
@@ -78,13 +77,12 @@ pool_addr_t bm_mem_pool::bm_mem_pool_alloc(pool_addr_t size) {
   printf("mem_pool: actual size required = 0x%llx\n", size);
 #endif
   pthread_mutex_unlock(&P->mem_pool_lock);
-  return addr_to_alloc + GLOBAL_MEM_START_ADDR;
+  return addr_to_alloc;
 }
 
 void bm_mem_pool::bm_mem_pool_free(pool_addr_t addr_to_free) {
   struct pool_struct *P = &_mem_pool_list[0];
   pthread_mutex_lock(&P->mem_pool_lock);
-  addr_to_free -= GLOBAL_MEM_START_ADDR;
   pool_map_t::iterator it = P->slot_in_use.find(addr_to_free);
   ASSERT(it != P->slot_in_use.end());
   pool_size_t size_to_free = P->slot_in_use[addr_to_free];

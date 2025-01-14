@@ -20,16 +20,22 @@ else()
         tools/flatbuffers/code_generators.cpp)
 
     add_library(bmodel STATIC ${srcs})
+    target_compile_options(bmodel PRIVATE -fPIC)
     target_include_directories(bmodel PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     set_target_properties(bmodel PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_features(bmodel PUBLIC cxx_std_11)
 
-    include(git-utils)
-    get_version_from_tag(version soversion revision)
+    #include(git-utils)
+    #get_version_from_tag(version soversion revision)
 
-    add_executable(tpu_model tools/tpu_model.cpp)
-    target_link_libraries(tpu_model bmodel)
+    set(revision "1.0")
+    add_executable(tpu_model tools/tpu_model.cpp tools/model_tool.cpp)
+    target_link_libraries(tpu_model bmodel ${CMAKE_DL_LIBS})
+    add_library(model_combine SHARED tools/tpu_model.cpp tools/model_combine.cpp)
+    target_link_libraries(model_combine bmodel ${CMAKE_DL_LIBS})
+    add_executable(demo tools/demo.cpp)
+    target_link_libraries(demo model_combine ${CMAKE_DL_LIBS})
     target_compile_definitions(tpu_model PRIVATE VER="${revision}")
     target_compile_features(tpu_model PUBLIC cxx_std_11)
 

@@ -4,12 +4,35 @@
 #include "bmruntime.h"
 
 namespace bmruntime {
+static void check_user_addr(std::vector<tpu_tensor_info_t> tensors_info, bool is_input) {
+  for (size_t i = 0; i < tensors_info.size()-1; i++) {
+    auto tensor_info = tensors_info.at(i);
+    auto next_tensor_info = tensors_info.at(i+1);
+    u64 user_addr = tensor_info.user_global_addr;
+    u64 next_user_addr = next_tensor_info.user_global_addr;
+    size_t tensor_size = bmrt_data_type_size((bm_data_type_t)tensor_info.dtype) *
+                         (tensor_info.n * tensor_info.c * tensor_info.h * tensor_info.w);
+    if (next_user_addr-user_addr != tensor_size) {
+      if (is_input) {  // input
+        BMRT_LOG(FATAL, "user input address discontinuity, current:input_addr[%d]=%d, failed:input_addr[%d]=%d, data_size:%d", i, user_addr, i+1, next_user_addr, tensor_size);
+      } else {  // output
+        BMRT_LOG(FATAL, "user output address discontinuity, current:output_addr[%d]=%d, failed:output_addr[%d]=%d, data_size:%d", i, user_addr, i+1, next_user_addr, tensor_size);
+      }
+    }
+  }
+}
+
 void bmdnn_func_1688::fill_api_info(const tpu_net_info_t &net_info,
                                     api_info_t &api_info) {
   BMRT_ASSERT_INFO(net_info.neuron_start_addr.size() == 1,
                    "only support one neuron addr");
   const std::vector<tpu_tensor_info_t> &input_info = net_info.input_info;
   const std::vector<tpu_tensor_info_t> &output_info = net_info.output_info;
+  // check user address is continuous when io_tag_fuse
+  if (net_info.addr_mode == ADDR_MODE_IO_TAG_FUSE) {
+    check_user_addr(input_info, true);
+    check_user_addr(output_info, false);
+  }
   api_info.api_data.resize(net_info.core_commands.size());
   int base_message_id = 0;
   for (auto core_id : net_info.core_list) {

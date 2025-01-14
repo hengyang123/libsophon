@@ -55,7 +55,9 @@ struct bm_gmem_addr {
 };
 
 struct bm_mem_paddr {
+#ifdef __linux__
   struct rb_node node;
+#endif
   unsigned long long paddr;
   bm_device_mem_u64_t *dev_buffer;
 };

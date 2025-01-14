@@ -8,22 +8,22 @@
 #include "bmlib_interface.h"
 #include "bmlib_version.h"
 
-#ifdef _WIN32
-	#include <stdlib.h>
-	#include <sys/stat.h>
-	#include <iostream>
-	#include <SetupAPI.h>
-	#pragma comment(lib, "SetupAPI.Lib")
-#else
+#ifdef __linux__
 	#include <unistd.h>
 	#include "bmlib_mmpool.h"
 	#include "ion.h"
 	#ifdef USING_CMODEL
 	#include "bmlib_device.h"
-//	#include "cmodel_runtime.h"
+  //	#include "cmodel_runtime.h"
 	/* global dummy bm device manager control */
 	bm_device_manager_control bm_dev_mgr_ctrl;
-	#endif
+  #endif
+#else
+	#include <stdlib.h>
+	#include <sys/stat.h>
+	#include <iostream>
+	#include <SetupAPI.h>
+	#pragma comment(lib, "SetupAPI.Lib")
 #endif
 
 #define BMLIB_RUNTIME_LOG_TAG "bmlib_runtime"
@@ -250,8 +250,12 @@ bm_status_t bm_update_firmware_a9(bm_handle_t handle, pbm_fw_desc pfw) {
 }
 #endif
 
-bm_status_t bm_send_api(bm_handle_t handle, int api_id, const u8 *api,
-                        u32 size) {
+bm_status_t bm_send_api_to_core(
+  bm_handle_t handle,
+  int api_id,
+  const u8 *api,
+  u32 size,
+  int core_id) {
   if (handle == nullptr) {
     bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR,
           "handle is nullptr %s: %s: %d\n", __FILE__, __func__, __LINE__);
@@ -262,13 +266,10 @@ bm_status_t bm_send_api(bm_handle_t handle, int api_id, const u8 *api,
           "invalid size = 0x%x!\n", size);
     return BM_ERR_PARAM;
   }
-  bm_profile_record_send_api(handle, api_id);
+  bm_profile_record_send_api(handle, api_id, api, core_id);
 
 #ifdef USING_CMODEL
-#ifdef BM_TV_GEN
-  bm_device_sync(handle);
-#endif
-  return handle->bm_dev->bm_device_send_api(api_id, api, size);
+  return handle->bm_dev->bm_device_send_api(api_id, api, size, core_id);
 #else
   /* bm api message struct
    * represent the api information to be sent to driver
@@ -291,14 +292,9 @@ bm_status_t bm_send_api(bm_handle_t handle, int api_id, const u8 *api,
 #endif
 }
 
-bm_status_t bm_send_api_to_core(
-  bm_handle_t  handle,
-  int api_id,
-  const u8     *api,
-  u32          size,
-  int          core_id) {
-    (void)core_id;
-    return bm_send_api(handle, api_id, api, size);
+bm_status_t bm_send_api(bm_handle_t handle, int api_id, const u8 *api,
+                        u32 size) {
+   return bm_send_api_to_core(handle, api_id, api, size, 0);
 }
 
 bm_status_t bm_device_sync(bm_handle_t handle) {
@@ -318,7 +314,9 @@ bm_status_t bm_device_sync(bm_handle_t handle) {
 #endif
 }
 
-bm_status_t bm_handle_sync(bm_handle_t handle) {
+bm_status_t bm_handle_sync_from_core(bm_handle_t handle, int core_id)
+{
+  UNUSED(core_id);
 #ifdef USING_CMODEL
   return handle->bm_dev->bm_device_sync();
 #else
@@ -333,6 +331,11 @@ bm_status_t bm_handle_sync(bm_handle_t handle) {
   else
     return BM_ERR_FAILURE;
 #endif
+}
+
+bm_status_t bm_handle_sync(bm_handle_t handle)
+{
+  return bm_handle_sync_from_core(handle, 0);
 }
 
 u64 bm_get_version(bm_handle_t handle) {
@@ -353,11 +356,11 @@ u64 bm_get_version(bm_handle_t handle) {
 #endif
 }
 
-bm_status_t bm_thread_sync(bm_handle_t handle) {
-    bm_profile_record_sync_begin(handle);
+bm_status_t bm_thread_sync_from_core(bm_handle_t handle, int core_id) {
+    bm_profile_record_sync_begin(handle, core_id);
     bm_status_t status = BM_SUCCESS;
 #ifdef USING_CMODEL
-    status =  handle->bm_dev->bm_device_sync();
+    status =  handle->bm_dev->bm_device_thread_sync_from_core(core_id);
 #else
     if (handle == nullptr) {
         bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR,
@@ -370,17 +373,22 @@ bm_status_t bm_thread_sync(bm_handle_t handle) {
         status = BM_ERR_FAILURE;
     }
 #endif
-    bm_profile_record_sync_end(handle);
+    bm_profile_record_sync_end(handle, core_id);
     return status;
 }
 
-bm_status_t bm_thread_sync_from_core(bm_handle_t handle, int core_id) {
-  (void)core_id;
-  return bm_thread_sync(handle);
+bm_status_t bm_thread_sync(bm_handle_t handle)
+{
+  return bm_thread_sync_from_core(handle, 0);
+}
+
+
+bm_status_t bm_sync_api_from_core(bm_handle_t handle, int core_id) {
+  return bm_thread_sync_from_core(handle, core_id);
 }
 
 bm_status_t bm_sync_api(bm_handle_t handle) {
-    return bm_thread_sync(handle);
+  return bm_sync_api_from_core(handle, 0);
 }
 
 bm_status_t bm_set_sync_timeout(bm_handle_t handle, int timeout) {
@@ -679,13 +687,26 @@ bm_status_t bm_dev_request(bm_handle_t *handle, int devid) {
     }
     *handle              = ctx;
     bm_disable_iommu(*handle);
+    (*handle)->mem_mutex = CreateMutex(
+        NULL,  // default security attributes
+        FALSE, // initially not owned
+        NULL); // unnamed mutex
+    if ((*handle)->mem_mutex == NULL) {
+        bmlib_log(
+            BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR, "init mem_mutex error!\n");
+        return BM_ERR_FAILURE;
+    }
     printf("Create sophon device %d success\n", ctx->dev_id);
 #endif
-  if (get_env_bool_value("BMLIB_ENABLE_ALL_PROFILE", false)) {
-      printf("entry bm_profile_init\n");
-      bm_profile_init(ctx, true);
-      printf("exit bm_profile_init\n");
- }
+    if (get_env_bool_value("BMLIB_ENABLE_ALL_PROFILE", false)) {
+        bm_profile_init(ctx, true);
+    }
+
+    ctx->enable_mem_guard = get_env_bool_value("BMLIB_ENABLE_MEM_GUARD", false);
+    if(ctx->enable_mem_guard) {
+      bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_INFO, "mem guard mode is enabled\n");
+    }
+
     return BM_SUCCESS;
 }
 
@@ -696,14 +717,19 @@ void bm_dev_free(bm_handle_t handle) {
           __FILE__, __func__, __LINE__);
     return;
   }
-
+#ifdef __linux__
   pthread_mutex_destroy(&handle->mem_mutex);
+#else
+  CloseHandle(&handle->mem_mutex);
+#endif
 
   if (handle->profile){
       bm_profile_deinit(handle);
   }
 #ifdef __linux__
     #if defined USING_CMODEL
+      bm_device_manager *bm_dev_mgr = bm_device_manager::get_dev_mgr();
+      bm_dev_mgr->free_bm_device(handle->dev_id);
       handle->bm_dev = nullptr;
     #else
       switch (handle->misc_info.chipid) {
@@ -733,6 +759,8 @@ void bm_dev_free(bm_handle_t handle) {
         CloseHandle(handle->hDevice);
         handle->hDevice = INVALID_HANDLE_VALUE;
     }
+    if (handle->mem_mutex != NULL)
+        CloseHandle(handle->mem_mutex);
     free(handle);
 #endif
 }
@@ -1031,10 +1059,11 @@ bm_status_t bm_get_tpu_scalar_num(bm_handle_t handle, unsigned int *core_num) {
   ret = bm_get_chipid(handle, &chip_id);
   if (ret != BM_SUCCESS)
     return ret;
-
-  *core_num = 1;
+  if (chip_id == 0x2380)
+    *core_num = 4;
+  else
+    *core_num = 1;
 #endif
-
   return BM_SUCCESS;
 }
 
@@ -1138,7 +1167,7 @@ bm_status_t bm_get_clk_tpu_freq(bm_handle_t handle, int *freq) {
 #ifdef USING_CMODEL
   UNUSED(handle);
   UNUSED(freq);
-
+  *freq = 1000;
   return BM_SUCCESS;
 #else
   if (handle == nullptr) {
@@ -1244,6 +1273,9 @@ bm_status_t bm_get_reg(bm_handle_t handle, struct bm_reg *reg) {
 }
 
 bm_status_t bm_rw_host(bm_handle_t handle, struct bm_rw *reg) {
+#ifndef __linux__
+    return BM_ERR_FAILURE;
+#else
 #ifdef USING_CMODEL
   UNUSED(handle);
   UNUSED(reg);
@@ -1262,9 +1294,13 @@ bm_status_t bm_rw_host(bm_handle_t handle, struct bm_rw *reg) {
   else
     return BM_ERR_FAILURE;
 #endif
+#endif
 }
 
 bm_status_t bm_rw_mix(bm_handle_t handle, struct bm_rw *reg) {
+#ifndef __linux__
+    return BM_ERR_FAILURE;
+#else
 #ifdef USING_CMODEL
   UNUSED(handle);
   UNUSED(reg);
@@ -1282,6 +1318,7 @@ bm_status_t bm_rw_mix(bm_handle_t handle, struct bm_rw *reg) {
     return BM_SUCCESS;
   else
     return BM_ERR_FAILURE;
+#endif
 #endif
 }
 
@@ -1427,9 +1464,9 @@ bm_status_t bm_trigger_spacc(bm_handle_t handle, struct spacc_batch* batch) {
 
 bm_status_t bm_is_seckey_valid(bm_handle_t handle, int* is_valid) {
 #ifdef USING_CMODEL
-	UNUSED(handle);
-	UNUSED(is_valid);
-	return BM_SUCCESS;
+    UNUSED(handle);
+    UNUSED(is_valid);
+    return BM_SUCCESS;
 #else
   if (handle == nullptr) {
     bmlib_log(BMLIB_SPACC_TRIGGER_LOG_TAG, BMLIB_LOG_ERROR,
@@ -1447,9 +1484,9 @@ bm_status_t bm_is_seckey_valid(bm_handle_t handle, int* is_valid) {
 
 bm_status_t bm_efuse_write(bm_handle_t handle, struct bm_efuse_param *efuse_param) {
 #ifdef USING_CMODEL
-	UNUSED(handle);
-	UNUSED(efuse_param);
-	return BM_SUCCESS;
+    UNUSED(handle);
+    UNUSED(efuse_param);
+    return BM_SUCCESS;
 #else
   if (handle == nullptr) {
     bmlib_log(BMLIB_SPACC_TRIGGER_LOG_TAG, BMLIB_LOG_ERROR,
@@ -1467,9 +1504,9 @@ bm_status_t bm_efuse_write(bm_handle_t handle, struct bm_efuse_param *efuse_para
 
 bm_status_t bm_efuse_read(bm_handle_t handle, struct bm_efuse_param *efuse_param) {
 #ifdef USING_CMODEL
-	UNUSED(handle);
-	UNUSED(efuse_param);
-	return BM_SUCCESS;
+    UNUSED(handle);
+    UNUSED(efuse_param);
+    return BM_SUCCESS;
 #else
   if (handle == nullptr) {
     bmlib_log(BMLIB_SPACC_TRIGGER_LOG_TAG, BMLIB_LOG_ERROR,
@@ -1538,6 +1575,7 @@ bm_status_t bm_handle_i2c_write(bm_handle_t handle, struct bm_i2c_param *i2c_par
 bm_status_t bm_handle_i2c_access(bm_handle_t handle, struct bm_i2c_smbus_ioctl_info *i2c_buf) {
 #ifdef USING_CMODEL
   UNUSED(handle);
+  //UNUSED(i2c_param);
 
   return BM_SUCCESS;
 #else
@@ -2320,27 +2358,11 @@ bm_status_t bm_get_handle_fd(bm_handle_t handle,FD_ID id, int *fd){
 #endif
 }
 
-tpu_kernel_module_t tpu_kernel_load_module_to_core(bm_handle_t handle, const char *data, size_t length, int core_id) {
-  (void) core_id;
-  return tpu_kernel_load_module(handle, data, length);
-}
-
-tpu_kernel_function_t tpu_kernel_get_function_from_core(bm_handle_t handle, tpu_kernel_module_t module, const char *function, int core_id) {
-  (void) core_id;
-  return tpu_kernel_get_function(handle, module, function);
-}
-
-bm_status_t tpu_kernel_launch_from_core(bm_handle_t handle, tpu_kernel_function_t function, void *args, size_t size, int core_id) {
-  (void) core_id;
-  return tpu_kernel_launch(handle, function, args, size);
-}
-
-bm_status_t tpu_kernel_launch_async_from_core(bm_handle_t handle, tpu_kernel_function_t function, void *args, size_t size, int core_id) {
-  (void) core_id;
-  return tpu_kernel_launch_async(handle, function, args, size);
-}
-
-bm_status_t tpu_kernel_unload_module_from_core(bm_handle_t handle, tpu_kernel_module_t p_module, int core_id) {
-  (void) core_id;
-  return tpu_kernel_unload_module(handle, p_module);
+DECL_EXPORT int bm_is_dynamic_loading(bm_handle_t handle) {
+#ifdef USING_CMODEL
+  int arch_code = handle->bm_dev->chip_id;
+#else
+  int arch_code = handle->misc_info.chipid;
+#endif
+  return arch_code == 0x1686 || arch_code == 0x1686a200;
 }

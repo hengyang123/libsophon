@@ -100,6 +100,6 @@ function update_firmware(){
     echo "TPU1686: `git rev-parse HEAD`" > ${FIRMWARE_PATH}/${LIBNAME}_version.txt
     echo "updated: `date`" >> ${FIRMWARE_PATH}/${LIBNAME}_version.txt
     popd
-    cat ${FIRMWARE_PATH}/${CHIP_ARCH}_version.txt
+    cat ${FIRMWARE_PATH}/${LIBNAME}_version.txt
 }
 

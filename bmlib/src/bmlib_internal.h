@@ -12,6 +12,7 @@
 #include <initguid.h>
 #include <guiddef.h>
 #include "window/bmlib_ioctl.h"
+#include <set>
 //#include "..\..\common\bm1684\include_win\common_win.h"
 #else
 #include "linux/bmlib_ioctl.h"
@@ -115,17 +116,20 @@ typedef struct bm_context {
 	  vpp_fd_t vpp_fd;
 	#endif
   	int dev_id;
- #else
+	pthread_mutex_t mem_mutex;
+	struct rb_root root;
+#else
     u32 dev_id;
 	HDEVINFO                         hDevInfo;
     PSP_DEVICE_INTERFACE_DETAIL_DATA pDeviceInterfaceDetail;
     HANDLE                           hDevice;
     struct bm_misc_info              misc_info;
     bm_cdma_iommu_mode               cdma_iommu_mode;
+	HANDLE mem_mutex;
+	std::set<void *> root;
 #endif
     bmlib_profile_t *profile;
-    struct rb_root root;
-    pthread_mutex_t mem_mutex;
+    int enable_mem_guard;
 } bm_context_t, *bm_handle_t;
 
 DECL_EXPORT bm_status_t bm_send_api(
@@ -147,6 +151,10 @@ DECL_EXPORT bm_status_t bm_send_api_ext(
   const u8     *api,
   u32          size,
   u64 *api_handle);
+
+DECL_EXPORT bm_status_t bm_get_tpu_scalar_num(
+  bm_handle_t  handle,
+  unsigned int* core_num);
 
 struct ce_cipher {
 	  int			  alg;
@@ -211,6 +219,7 @@ typedef struct loaded_lib {
 } loaded_lib_t;
 
 DECL_EXPORT bm_status_t bm_sync_api(bm_handle_t handle);
+DECL_EXPORT bm_status_t bm_sync_api_from_core(bm_handle_t handle, int core_id);
 
 u64 bm_get_version(bm_handle_t handle);
 
@@ -505,6 +514,8 @@ bm_status_t bmlib_log_mutex_lock(void);
 bm_status_t bmlib_log_mutex_unlock(void);
 
 DECL_EXPORT int platform_ioctl(bm_handle_t handle, u32 commandID, void *param);
+
+DECL_EXPORT int bm_is_dynamic_loading(bm_handle_t handle);
 
 #ifdef _WIN32
 DECL_EXPORT int gettimeofday(struct timeval *tp, void *tzp);

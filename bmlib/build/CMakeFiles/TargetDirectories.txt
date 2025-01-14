@@ -1,0 +1,8 @@
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/libsophon_deb_script.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/bmlib.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/edit_cache.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/rebuild_cache.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/list_install_components.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/install.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/install/local.dir
+/workspace/opensource-github/libsophon/bmlib/build/CMakeFiles/install/strip.dir

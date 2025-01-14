@@ -7,15 +7,15 @@
 #include <errno.h>
 #include "bmlib_runtime.h"
 
-#ifdef WIN32
-#include <io.h>
-#include <windows.h>
-#else
+#ifdef __linux__
 #include <unistd.h>
 #include <sys/time.h>
+#else
+#include <io.h>
+#include <windows.h>
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 int gettimeofday(struct timeval * tp, struct timezone * tzp)
 {
     // Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's

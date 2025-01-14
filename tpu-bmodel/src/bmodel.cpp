@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <ctime>
 #include <iostream>
+#ifdef __linux__
+#include <dlfcn.h>
+#endif
 
 using bmodel::Binary;
 using bmodel::Model;
@@ -41,11 +44,20 @@ const uint32_t BMODEL_MAGIC = 0xFF55AAEE;
     }                                           \
   } while (0)
 
-ModelGen::ModelGen(uint32_t reserved_size)
+//===------------------------------------------------------------===//
+// ModelGen
+//===------------------------------------------------------------===//
+ModelGen::ModelGen(uint32_t reserved_size, const std::string &encryp_lib)
 {
   binary_.reserve(reserved_size);
   max_neuron_size_ = 0;
   num_device_ = 0;
+  bmodel_type_ = 0;
+  encrypt_handle_ = nullptr;
+  encrypt_lib_ = encryp_lib;
+  if (!encrypt_lib_.empty()) {
+    InitEncrypt();
+  }
 }
 
 FlatBufferBuilder &ModelGen::Builder()
@@ -53,9 +65,13 @@ FlatBufferBuilder &ModelGen::Builder()
   return builder_;
 }
 
-ModelGen::~ModelGen()
-{
+ModelGen::~ModelGen() {
   builder_.ReleaseBufferPointer();
+#ifdef __linux__
+  if (encrypt_handle_) {
+    dlclose(encrypt_handle_);
+  }
+#endif
 }
 
 Binary ModelGen::WriteBinary(size_t size, uint8_t *data)
@@ -160,6 +176,24 @@ void ModelGen::AddNet(string net_name, const Offset<NetParameter> &parameter, ui
         BMODEL_LOG(FATAL) << "net[" << net_name << "] dynamic is conflict." << std::endl;
         exit(-1);
       }
+      for (int i = 0; i < net_old->input_tensor()->size(); ++i) {
+        if (net_old->input_tensor()->Get(i)->name()->str() != net_new->input_tensor()->Get(i)->name()->str()) {
+          BMODEL_LOG(FATAL) << "net[" << net_name << "] input names is conflict."
+                            << "input " << i << ": origin name: " << net_old->input_tensor()->Get(i)->name()->str()
+                            << ". new name " << net_new->input_tensor()->Get(i)->name()->str() << "."
+                            << std::endl;
+          exit(-1);
+        }
+      }
+      for (int i = 0; i < net_old->output_tensor()->size(); ++i) {
+        if (net_old->output_tensor()->Get(i)->name()->str() != net_new->output_tensor()->Get(i)->name()->str()) {
+          BMODEL_LOG(FATAL) << "net[" << net_name << "] output names is conflict."
+                            << "output " << i << ": origin name: " << net_old->output_tensor()->Get(i)->name()->str()
+                            << ". new name " << net_new->output_tensor()->Get(i)->name()->str() << "."
+                            << std::endl;
+          exit(-1);
+        }
+      }
       bool old_have_subnet =
           (net_old->sub_net() != NULL) ? (net_old->sub_net()->size() > 1) : false;
       bool new_have_subnet =
@@ -174,6 +208,72 @@ void ModelGen::AddNet(string net_name, const Offset<NetParameter> &parameter, ui
     }
     parameters.push_back(parameter);
   }
+}
+
+void ModelGen::InitEncrypt() {
+#ifdef __linux__
+  encrypt_handle_ = dlopen(encrypt_lib_.c_str(), RTLD_LAZY);
+  if (!encrypt_handle_) {
+    BMODEL_LOG(FATAL) << "Decrypt lib [" << encrypt_lib_ << "] load failed."
+                      << std::endl;
+    exit(-1);
+  }
+  encrypt_func_ = (encrypt_func)dlsym(encrypt_handle_, "encrypt");
+  auto error = dlerror();
+  if (error) {
+    BMODEL_LOG(FATAL) << "Decrypt lib [" << encrypt_lib_
+                      << "] symbol find failed." << std::endl;
+    exit(-1);
+  }
+#else
+  BMODEL_LOG(FATAL) << "Not support for windows" << std::endl;
+  exit(-1);
+#endif
+}
+
+uint8_t *ModelGen::Encrypt(uint8_t *input, uint64_t input_bytes,
+                           uint64_t *output_bytes) {
+  ASSERT(output_bytes != nullptr);
+  ASSERT(encrypt_func_ != nullptr);
+  return encrypt_func_(input, input_bytes, output_bytes);
+}
+
+void ModelGen::SaveEncrypt(const string &filename) {
+  // write new file
+  ASSERT(!filename.empty());
+  std::ofstream fout(filename,
+                     std::ios::out | std::ios::trunc | std::ios::binary);
+  if (!fout) {
+    BMODEL_LOG(FATAL) << "Save file[" << filename << "] failed." << std::endl;
+    exit(-1);
+  }
+  // encrypt flatbuffer
+  uint64_t en_fb_size = 0;
+  auto en_bf_buffer = encrypt_func_(builder_.GetBufferPointer(),
+                                    builder_.GetSize(), &en_fb_size);
+
+  // encrypt header
+  MODEL_HEADER_T header;
+  memset(&header, 0, sizeof(header));
+  header.magic = BMODEL_MAGIC;
+  header.header_size = sizeof(header);
+  header.flatbuffers_size = en_fb_size;
+  header.binary_size = binary_.size();
+  uint8_t *p_header = (uint8_t *)&header;
+  auto hd_offset = sizeof(header.magic) + sizeof(header.header_size);
+  uint64_t en_hd_size = 0;
+  auto en_hd_buffer = encrypt_func_(p_header + hd_offset,
+                                    sizeof(header) - hd_offset, &en_hd_size);
+  header.header_size = hd_offset + en_hd_size;
+  // write file
+  fout.write((char *)p_header, hd_offset);
+  fout.write((char *)en_hd_buffer, en_hd_size);
+  fout.write((char *)en_bf_buffer, en_fb_size);
+  fout.write((char *)binary_.data(), binary_.size());
+  fout.close();
+  // free buffer
+  free(en_bf_buffer);
+  free(en_hd_buffer);
 }
 
 bool ModelGen::IsShapeSame(const bmodel::Shape *left, const bmodel::Shape *right)
@@ -247,6 +347,11 @@ void ModelGen::AddChip(const std::string &arch_name)
 {
   ASSERT(!arch_name.empty());
   chip_ = arch_name;
+}
+
+void ModelGen::AddBmodelType(const uint32_t type)
+{
+  bmodel_type_ = type;
 }
 
 void ModelGen::AddNumDevice(int num_device) { num_device_ = num_device; }
@@ -333,6 +438,7 @@ size_t ModelGen::Finish()
   mb.add_kernel_module(kernel_module);
   mb.add_device_num(num_device_);
   mb.add_cpuop_module(cpuop_module);
+  mb.add_bmodel_type(bmodel_type_);
 
   auto model = mb.Finish();
   builder_.Finish(model);
@@ -382,10 +488,28 @@ void ModelGen::Save(void *buffer)
   memcpy(p_binary, binary_.data(), p_header->binary_size);
 }
 
-ModelCtx::ModelCtx(const string &filename) : model_gen_(NULL), model_(NULL), bmodel_pointer_(NULL)
+uint64_t ModelGen::BufferSize() {
+  return sizeof(MODEL_HEADER_T) + builder_.GetSize() + binary_.size();
+}
+
+//===------------------------------------------------------------===//
+// ModelCtx
+//===------------------------------------------------------------===//
+ModelCtx::ModelCtx(const string &filename, const string &decrypt_lib, decrypt_func f)
+  : model_gen_(NULL), model_(NULL), bmodel_pointer_(NULL),
+    decrypt_lib_(decrypt_lib), decrypt_handle_(nullptr), decrypt_func_(f)
 {
   // read file
-  file_.open(filename, std::ios::binary | std::ios::in | std::ios::out);
+  // when read encrypted bmodel, only to read, not to write
+  if (!decrypt_lib_.empty() || decrypt_func_ != nullptr) {
+    file_.open(filename, std::ios::binary | std::ios::in);
+  } else {
+    file_.open(filename, std::ios::binary | std::ios::in | std::ios::out);
+    if (!file_) {
+      file_.open(filename, std::ios::binary | std::ios::in);
+    }
+  }
+
   if (!file_) {
     BMODEL_LOG(FATAL) << "File[" << filename << "] open failed." << std::endl;
     throw std::runtime_error("failed to construct");
@@ -395,6 +519,11 @@ ModelCtx::ModelCtx(const string &filename) : model_gen_(NULL), model_(NULL), bmo
   if (length <= sizeof(header_)) {
     BMODEL_LOG(FATAL) << "File[" << filename << "] is broken ." << std::endl;
     throw std::runtime_error("failed to construct");
+  }
+  if (!decrypt_lib_.empty() || decrypt_func_ != nullptr) {
+    init_decrypt();
+    decrypt_bmodel(filename);
+    return;
   }
   file_.seekg(0, std::ios::beg);
 
@@ -427,33 +556,224 @@ ModelCtx::ModelCtx(const string &filename) : model_gen_(NULL), model_(NULL), bmo
     throw std::runtime_error("failed to construct");
   }
   model_ = bmodel::GetModel(model_buffer_);
-  ASSERT(model_ != NULL);
+  if (model_ == nullptr) {
+    BMODEL_LOG(FATAL) << "Model file[" << filename << "] is broken." << std::endl;
+    throw std::runtime_error("failed to construct");
+  }
   update_bmodel();
 }
 
+uint8_t *ModelCtx::decrypt_file(const std::string &filename, uint64_t *out_size) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        return nullptr;
+    }
+
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    if (size == 0) {
+      std::cerr << "Failed as file empty: " << filename << std::endl;
+      return nullptr;
+    }
+    file.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> buffer(size);
+    if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+        std::cerr << "Failed to read file: " << filename << std::endl;
+        return nullptr;
+    }
+
+    file.close();
+
+    uint8_t *out_buffer = decrypt_func_(buffer.data(), size, out_size);
+    if (!out_buffer) {
+        std::cerr << "Decryption failed for file: " << filename << std::endl;
+        return nullptr;
+    }
+
+    return out_buffer;
+}
+
+uint8_t *ModelCtx::decrypt_buffer_from_file(uint64_t file_start, uint64_t size,
+                                            uint64_t *out_size) {
+  if (out_size == nullptr) {
+    BMODEL_LOG(FATAL) << "out_size is null" << std::endl;
+    return nullptr;
+  }
+  file_.seekg(file_start, std::ios::beg);
+  if (file_.fail()) {
+    BMODEL_LOG(FATAL) << "Failed to seek to the specified position." << std::endl;
+    return nullptr;
+  }
+  // read to buffer
+  uint8_t *buffer = (uint8_t *)malloc(size);
+  if (buffer == nullptr) {
+    BMODEL_LOG(FATAL) << "Memory allocation failed" << std::endl;
+    return nullptr;
+  }
+  file_.read(reinterpret_cast<char *>(buffer), size);
+  if (file_.fail()) {
+    BMODEL_LOG(FATAL) << "Failed to read from the file." << std::endl;
+    free(buffer);
+    return nullptr;
+  }
+  // encrypt or decrypt
+  uint8_t *out_buffer = decrypt_func_(buffer, size, out_size);
+  free(buffer);
+  return out_buffer;
+}
+
+void ModelCtx::decrypt_bmodel(const std::string &filename) {
+  // decrypt header
+  file_.seekg(0, std::ios::end);
+  size_t length = file_.tellg();
+  file_.seekg(0, std::ios::beg);
+  file_.read((char *)&header_, sizeof(header_));
+  if (header_.magic != BMODEL_MAGIC) {
+    BMODEL_LOG(FATAL) << "File[" << filename << "] is broken .." << std::endl;
+    throw std::runtime_error("failed to load bmodel");
+  }
+  uint64_t header_start = sizeof(header_.magic) + sizeof(header_.header_size);
+  uint64_t to_decrypt_header_size = header_.header_size - header_start;
+  uint64_t decrypted_header_size = 0;
+  uint8_t *decrypted_header_data = decrypt_buffer_from_file(
+      header_start, to_decrypt_header_size, &decrypted_header_size);
+  if (decrypted_header_data == nullptr || (decrypted_header_size + header_start != sizeof(header_))) {
+    BMODEL_LOG(FATAL) << "File[" << filename << "] is broken .." << std::endl;
+    if (decrypted_header_data != nullptr) {
+      free(decrypted_header_data);
+    }
+    throw std::runtime_error("failed to decrypt");
+  }
+  memcpy((char *)&header_ + header_start, decrypted_header_data,
+         decrypted_header_size);
+
+  // check reserved to determine key in decryption
+  size_t reserved_length = sizeof(header_.reserved) / sizeof(uint32_t);
+  for (size_t i = 0; i < reserved_length; ++i) {
+    if (header_.reserved[i] != 0) {
+      BMODEL_LOG(FATAL) << "your decrypt key is broken." << std::endl;
+      throw std::runtime_error("failed to decrypt");
+    }
+  }
+
+  // decrypt flatbuffer
+  uint64_t flat_start = header_.header_size;
+  uint64_t to_decrypt_flat_size = header_.flatbuffers_size;
+  uint64_t decrypted_flat_size = 0;
+  uint8_t *decrypted_flat_data = decrypt_buffer_from_file(
+      flat_start, to_decrypt_flat_size, &decrypted_flat_size);
+  if (decrypted_flat_data == nullptr) {
+    BMODEL_LOG(FATAL) << "File[" << filename << "] is broken .." << std::endl;
+    throw std::runtime_error("failed to decrypt");
+  }
+
+  binary_offset_ = header_.header_size + header_.flatbuffers_size;
+  if ((binary_offset_ + header_.binary_size) > length) {
+    BMODEL_LOG(FATAL) << "Bmodel data is broken ." << std::endl;
+    throw std::runtime_error("failed to construct");
+  }
+  model_buffer_ = (void *)malloc(decrypted_flat_size);
+  if (model_buffer_ == nullptr) {
+    BMODEL_LOG(FATAL) << "Memory alloc failed" << std::endl;
+    throw std::runtime_error("failed to load bmodel");
+  }
+  memcpy(model_buffer_, decrypted_flat_data, decrypted_flat_size);
+
+  // free
+  free(decrypted_header_data);
+  free(decrypted_flat_data);
+
+  // check
+  flatbuffers::Verifier v((uint8_t *)model_buffer_, decrypted_flat_size);
+  if (!bmodel::VerifyModelBuffer(v)) {
+    BMODEL_LOG(FATAL) << "Model file[" << filename << "] is broken."
+                      << std::endl;
+    model_ = bmodel::GetModel(model_buffer_);
+    if (model_ != NULL) {
+      BMODEL_LOG(FATAL) << "=========== More Information ==========="
+                        << std::endl;
+      BMODEL_LOG(FATAL) << "Version: " << model_->type()->c_str() << "."
+                        << model_->version()->c_str() << std::endl;
+      BMODEL_LOG(FATAL) << "Chip: " << model_->chip()->c_str() << std::endl;
+      BMODEL_LOG(FATAL) << "Date: " << model_->time()->c_str() << std::endl;
+    }
+    throw std::runtime_error("failed to load bmodel");
+  }
+  model_ = bmodel::GetModel(model_buffer_);
+  if (model_ == NULL) {
+    BMODEL_LOG(FATAL) << "Model file[" << filename << "] is broken."
+                      << std::endl;
+    throw std::runtime_error("failed to load bmodel");
+  }
+  update_bmodel();
+}
+
+void ModelCtx::init_decrypt() {
+  if (decrypt_func_ != nullptr) {
+    return;
+  }
+#ifdef __linux__
+  decrypt_handle_ = dlopen(decrypt_lib_.c_str(), RTLD_LAZY);
+  if (!decrypt_handle_) {
+    BMODEL_LOG(FATAL) << "Decrypt lib [" << decrypt_lib_ << "] load failed."
+                      << std::endl;
+    throw std::runtime_error("failed to decrypt");
+  }
+  decrypt_func_ = (decrypt_func)dlsym(decrypt_handle_, "decrypt");
+  auto error = dlerror();
+  if (error) {
+    BMODEL_LOG(FATAL) << "Decrypt lib [" << decrypt_lib_
+                      << "] symbol find failed." << std::endl;
+    throw std::runtime_error("failed to decrypt");
+  }
+#else
+  BMODEL_LOG(FATAL) << "Not support for windows" << std::endl;
+  throw std::runtime_error("failed to decrypt");
+#endif
+}
+
+// encrypt coeffmem
+uint8_t *ModelCtx::read_binary_with_decrypt(const Binary *binary,
+                                            uint64_t *out_size) {
+  if (binary == nullptr || binary->size() == 0) {
+    BMODEL_LOG(FATAL) << "binary is null" << std::endl;
+    return nullptr;
+  }
+  auto size = binary->size();
+  auto start = binary->start();
+  // encrypt or decrypt
+  uint8_t *output =
+      decrypt_buffer_from_file(binary_offset_ + start, size, out_size);
+  return output;
+}
+
 ModelCtx::ModelCtx(const void *bmodel_data, size_t size)
-    : model_gen_(NULL), model_(NULL), model_buffer_(NULL), bmodel_pointer_(NULL)
-{
+    : model_gen_(NULL), model_(NULL), model_buffer_(NULL),
+      bmodel_pointer_(NULL), decrypt_handle_(NULL) {
   ASSERT(bmodel_data != NULL);
   if (size <= sizeof(header_)) {
     BMODEL_LOG(FATAL) << "Bmodel data is broken ." << std::endl;
-    exit(-1);
+    throw std::runtime_error("failed to construct");
   }
 
   // read header and check
   memcpy(&header_, bmodel_data, sizeof(header_));
   if (header_.magic != BMODEL_MAGIC) {
     BMODEL_LOG(FATAL) << "Bmodel data is broken .." << std::endl;
-    exit(-1);
+    throw std::runtime_error("failed to construct");
   }
-  if (size < header_.header_size + header_.flatbuffers_size + header_.binary_size) {
+  if (size <
+      header_.header_size + header_.flatbuffers_size + header_.binary_size) {
     BMODEL_LOG(FATAL) << "Bmodel data is broken ..." << std::endl;
-    exit(-1);
+    throw std::runtime_error("failed to construct");
   }
   binary_offset_ = header_.header_size + header_.flatbuffers_size;
   model_buffer_ = (void *)malloc(header_.flatbuffers_size);
   ASSERT(model_buffer_ != NULL);
-  memcpy(model_buffer_, (uint8_t *)bmodel_data + header_.header_size, header_.flatbuffers_size);
+  memcpy(model_buffer_, (uint8_t *)bmodel_data + header_.header_size,
+         header_.flatbuffers_size);
   flatbuffers::Verifier v((uint8_t *)model_buffer_, header_.flatbuffers_size);
   if (!bmodel::VerifyModelBuffer(v)) {
     BMODEL_LOG(FATAL) << "Model data is broken ...." << std::endl;
@@ -465,7 +785,7 @@ ModelCtx::ModelCtx(const void *bmodel_data, size_t size)
       BMODEL_LOG(FATAL) << "Chip: " << model_->chip()->c_str() << std::endl;
       BMODEL_LOG(FATAL) << "Date: " << model_->time()->c_str() << std::endl;
     }
-    exit(-1);
+    throw std::runtime_error("failed to construct");
   }
   model_ = bmodel::GetModel(model_buffer_);
   ASSERT(model_ != NULL);
@@ -491,6 +811,11 @@ ModelCtx::~ModelCtx()
   if (model_buffer_ != NULL) {
     free(model_buffer_);
   }
+#ifdef __linux__
+  if (decrypt_handle_ != nullptr) {
+    dlclose(decrypt_handle_);
+  }
+#endif
 }
 
 const void *ModelCtx::data() const
@@ -516,7 +841,15 @@ void ModelCtx::read_binary(const Binary *binary, uint64_t offset, uint8_t *buffe
   ASSERT(size + offset <= binary->size());
   if (bmodel_pointer_ == NULL) {  // from file
     file_.seekg(binary_offset_ + binary->start() + offset, std::ios::beg);
+    if (file_.fail()) {
+      BMODEL_LOG(FATAL) << "Failed to read in read_binary" << std::endl;
+      throw std::runtime_error("Failed to seek in read_binary");
+    }
     file_.read((char *)buffer, size);
+    if (file_.fail()) {
+      BMODEL_LOG(FATAL) << "Failed to read in read_binary" << std::endl;
+      throw std::runtime_error("Failed to read in read_binary");
+    }
   } else {  // from buffer
     memcpy(buffer, (uint8_t *)bmodel_pointer_ + binary_offset_ + binary->start() + offset, size);
   }
@@ -535,7 +868,15 @@ void ModelCtx::write_binary(const Binary *binary, uint64_t offset,
   auto offset_file = binary_offset_ + binary->start() + offset;
   if (bmodel_pointer_ == NULL) { // from file
     file_.seekg(offset_file, std::ios::beg);
+    if (file_.fail()) {
+      BMODEL_LOG(FATAL) << "Failed to seek in write_binary" << std::endl;
+      throw std::runtime_error("Failed to seek in write_binary");
+    }
     file_.write((char *)buffer, size);
+    if (file_.fail()) {
+      BMODEL_LOG(FATAL) << "Failed to read in write_binary" << std::endl;
+      throw std::runtime_error("Failed to read in write_binary");
+    }
   } else { // from buffer
     memcpy((uint8_t *)bmodel_pointer_ + offset_file, buffer, size);
   }
@@ -927,34 +1268,54 @@ bmodel::bmodel_mem_info_t ModelCtx::get_bmodel_mem_info()
             } else if(subnet->subnet_mode() == 0) { // run on TPU static/dynamic
                 if(subnet->is_dynamic()){
                     info.dynamic_ir_mem_size += subnet->ir_len()*sizeof(uint32_t);
-                } else {
-                    const auto cmd_groups = subnet->cmd_group() ? subnet->cmd_group() :
-                        subnet->core_commands()->Get(0)->gdma_tiu_commands();
-                    int group_num = cmd_groups->size();
-                    for (int group_idx = 0; group_idx < group_num; group_idx++) {
-                      auto cmd_group = cmd_groups->Get(group_idx);
-                      // just for bm1684. bm1684x instructions may be of variable length
-                      if(model()->chip()->str() == "BM1682"){
-                        info.bd_cmd_mem_size += cmd_group->bdc_num()*(1<<8);
-                        info.gdma_cmd_mem_size += cmd_group->gdma_num()*(1<<8);
-                      } else if(model()->chip()->str() == "BM1684"){
-                        info.bd_cmd_mem_size += cmd_group->bdc_num()*(1<<7);
-                        info.gdma_cmd_mem_size += cmd_group->gdma_num()*(1<<7);
-                      } else {
-                        info.bd_cmd_mem_size += cmd_group->binary_bdc()->size();
-                        info.gdma_cmd_mem_size += cmd_group->binary_gdma()->size();
-                      }
+                    uint64_t output_num = subnet->output_tensor()->size();
+                    if (output_num > info.dynamic_output_number) {
+                      info.dynamic_output_number = output_num;
                     }
-                    if (model()->chip()->str() == "SG2260") {
-                      for (unsigned int i = 0; i < subnet->core_commands()->size(); ++i) {
-                        auto core_cmd = subnet->core_commands()->Get(i);
-                        if (core_cmd->hau_commands()) {
-                          for (unsigned int j = 0; j < core_cmd->hau_commands()->size(); ++j)
-                            info.hau_cmd_mem_size += core_cmd->hau_commands()->Get(j)->size();
+                } else {
+                    auto core_num = subnet->core_commands() ? subnet->core_commands()->size() : 1;
+                    for (uint32_t core_idx = 0; core_idx < core_num; ++core_idx) {
+                      const auto cmd_groups = subnet->cmd_group() ? subnet->cmd_group() :
+                          subnet->core_commands()->Get(core_idx)->gdma_tiu_commands();
+                      int group_num = cmd_groups->size();
+                      for (int group_idx = 0; group_idx < group_num; group_idx++) {
+                        auto cmd_group = cmd_groups->Get(group_idx);
+                        // just for bm1684. bm1684x instructions may be of variable length
+                        if(model()->chip()->str() == "BM1682"){
+                          info.bd_cmd_mem_size += cmd_group->bdc_num()*(1<<8);
+                          info.gdma_cmd_mem_size += cmd_group->gdma_num()*(1<<8);
+                        } else if(model()->chip()->str() == "BM1684"){
+                          info.bd_cmd_mem_size += cmd_group->bdc_num()*(1<<7);
+                          info.gdma_cmd_mem_size += cmd_group->gdma_num()*(1<<7);
+                        } else {
+                          info.bd_cmd_mem_size += cmd_group->binary_bdc()->size();
+                          info.gdma_cmd_mem_size += cmd_group->binary_gdma()->size();
                         }
-                        if (core_cmd->sdma_commands()) {
-                          for (unsigned int j = 0; j < core_cmd->sdma_commands()->size(); ++j)
-                            info.sdma_cmd_mem_size += core_cmd->sdma_commands()->Get(j)->size();
+                      }
+                      // for (int group_idx = 0; group_idx < group_num; group_idx++) {
+                      //   auto cmd_group = subnet->cmd_group()->Get(group_idx);
+                      //   if (cmd_group->bdc_cmd_byte() > 0) {
+                      //     info.bd_cmd_mem_size += cmd_group->bdc_cmd_byte();
+                      //   } else {
+                      //     info.bd_cmd_mem_size += cmd_group->bdc_num()*(1<<cmd_bit);
+                      //   }
+                      //   if (cmd_group->gdma_cmd_byte() > 0) {
+                      //     info.gdma_cmd_mem_size += cmd_group->gdma_cmd_byte();
+                      //   } else {
+                      //     info.gdma_cmd_mem_size += cmd_group->gdma_num()*(1<<cmd_bit);
+                      //   }
+                      // }
+                      if (model()->chip()->str() == "SG2260") {
+                        for (unsigned int i = 0; i < subnet->core_commands()->size(); ++i) {
+                          auto core_cmd = subnet->core_commands()->Get(i);
+                          if (core_cmd->hau_commands()) {
+                            for (unsigned int j = 0; j < core_cmd->hau_commands()->size(); ++j)
+                              info.hau_cmd_mem_size += core_cmd->hau_commands()->Get(j)->size();
+                          }
+                          if (core_cmd->sdma_commands()) {
+                            for (unsigned int j = 0; j < core_cmd->sdma_commands()->size(); ++j)
+                              info.sdma_cmd_mem_size += core_cmd->sdma_commands()->Get(j)->size();
+                          }
                         }
                       }
                     }
@@ -965,18 +1326,20 @@ bmodel::bmodel_mem_info_t ModelCtx::get_bmodel_mem_info()
 
         info.host_neuron_mem_size  += param->cpu_mem_size()*sizeof(float);
 
-        for (size_t i = 0; i < param->input_tensor()->size(); i++) {
-          auto tensor = param->input_tensor()->Get(i);
-          auto tensor_buffer_size = get_tensor_buffer_size(tensor);
-          if(info.middle_buffer_size < tensor_buffer_size){
-              info.middle_buffer_size = tensor_buffer_size;
+        if (model()->chip()->str() == "BM1684") { // 1N to 4N buffer
+          for (size_t i = 0; i < param->input_tensor()->size(); i++) {
+            auto tensor = param->input_tensor()->Get(i);
+            auto tensor_buffer_size = get_tensor_buffer_size(tensor);
+            if(info.middle_buffer_size < tensor_buffer_size){
+                info.middle_buffer_size = tensor_buffer_size;
+            }
           }
-        }
-        for (size_t i = 0; i < param->output_tensor()->size(); i++) {
-          auto tensor = param->output_tensor()->Get(i);
-          auto tensor_buffer_size = get_tensor_buffer_size(tensor);
-          if(info.middle_buffer_size < tensor_buffer_size){
-              info.middle_buffer_size = tensor_buffer_size;
+          for (size_t i = 0; i < param->output_tensor()->size(); i++) {
+            auto tensor = param->output_tensor()->Get(i);
+            auto tensor_buffer_size = get_tensor_buffer_size(tensor);
+            if(info.middle_buffer_size < tensor_buffer_size){
+                info.middle_buffer_size = tensor_buffer_size;
+            }
           }
         }
       }
@@ -986,6 +1349,11 @@ bmodel::bmodel_mem_info_t ModelCtx::get_bmodel_mem_info()
           if(net_max_neuron_size<max_neuron_size){
               net_max_neuron_size = max_neuron_size;
           }
+      }
+
+      if (model()->net()->Get(net_idx)->cascade()) {
+        // TODO: compute hidden buffer size
+        info.hidden_buffer_size = 0;
       }
     }
     info.neuron_mem_size += net_max_neuron_size;

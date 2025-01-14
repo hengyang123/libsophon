@@ -72,6 +72,14 @@ set_target_properties(${TARGET_NAME} PROPERTIES SOVERSION ${sover})
 
 if("${PLATFORM}" STREQUAL "cmodel")
     message(STATUS "USING_CMODEL")
+
+    # use for TPU1686 sgdnn compile when docker version >=3.0
+    if(EXISTS $ENV{PREBUILT_DIR})
+        set(COMPILER_PREFIX $ENV{PREBUILT_DIR}/x86-64-core-i7--glibc--stable/bin/x86_64-linux-)
+        set(CMAKE_C_COMPILER ${COMPILER_PREFIX}gcc)
+        set(CMAKE_CXX_COMPILER ${COMPILER_PREFIX}g++)
+    endif()
+
     target_compile_definitions(${TARGET_NAME} PUBLIC -DUSING_CMODEL=1)
     target_link_libraries(${TARGET_NAME} dl pthread)
 endif()
@@ -79,9 +87,15 @@ endif()
 if("${PLATFORM}" STREQUAL "pcie_riscv64")
     add_definitions(-DSMMU_MODE=1)
 endif()
+if("${PLATFORM}" STREQUAL "pcie_arm64")
+    add_definitions(-DSMMU_MODE=1)
+endif()
 
 install(TARGETS ${TARGET_NAME}
         LIBRARY DESTINATION lib
+        COMPONENT libsophon)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/lib/memory_op.so
+        DESTINATION lib/dyn_load
         COMPONENT libsophon)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/debian-lib/libsophon.conf
         DESTINATION ./data
@@ -99,6 +113,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
             PATTERN "*.hpp"
             PATTERN "*.h")
 
-add_subdirectory(tools)
+if(NOT "${PLATFORM}" STREQUAL "cmodel")
+    add_subdirectory(tools)
+endif()
 
 endif()

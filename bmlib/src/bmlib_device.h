@@ -17,7 +17,7 @@ extern "C"
 #endif
 
 #define DEVICE_SYNC_MARKER 0xFFFF
-#define MAX_DEVICE_NUM 0x2
+#define MAX_DEVICE_NUM 0x1 // This is chip not core number
 
   struct thread_api_info
   {

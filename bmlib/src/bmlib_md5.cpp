@@ -10,6 +10,10 @@
 #else
 #include <unistd.h>
 #endif
+#ifndef __linux__
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
 
 unsigned char PADDING[] = {
     0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -192,6 +196,7 @@ void read_md5(unsigned char *file_path, unsigned char *md5sum)
     MD5Init(&md5);
     MD5Update(&md5, file_buffer, u32FileSize);
     MD5Final(&md5, md5sum);
+    free(file_buffer);
 }
 
 void calc_md5(unsigned char *data, size_t len, unsigned char *md5sum)

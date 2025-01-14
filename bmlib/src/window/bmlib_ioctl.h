@@ -35,10 +35,14 @@
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x19, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_GMEM_ADDR                                                        \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x1a, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BMDEV_FREE_GMEM_U64                                     \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x1c, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_SEND_API                                                         \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x20, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_THREAD_SYNC_API                                                  \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x21, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BMDEV_SYNC_TIMEOUT_API                                                 \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x22, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_DEVICE_SYNC_API                                                  \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x23, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_HANDLE_SYNC_API                                                  \
@@ -133,6 +137,10 @@
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x7F, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define BMDEV_TRIGGER_BMCPU                                                    \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BMDEV_SYNC_TIME_MIX                                                    \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0xAE, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define BMDEV_BAR_TRANS                                                        \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0xAF, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define BMDEV_GET_TPUC                                                         \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x81, METHOD_BUFFERED, FILE_ANY_ACCESS)

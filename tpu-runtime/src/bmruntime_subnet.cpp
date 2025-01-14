@@ -276,7 +276,7 @@ void* Bmruntime::subnet_tensor_d2s(uint32_t devid, map<string, tensor_ext_t> *su
 bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, const SUBNET_INFO_T* subnet,
                                      const bm_tensor_t* input_tensors, const int* input_elem_num, int input_num,
                                      bm_tensor_t* output_tensors, int* output_elem_num, int output_num,
-                                     const uint32_t dyn_core_mask)
+                                     const std::vector<int32_t> &real_core_list, const uint32_t dyn_core_mask)
 {
   auto devid = net_ctx->device_id;
   //BMRT_ASSERT(true == net_ctx->is_dynamic);
@@ -367,7 +367,7 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
   std::shared_ptr<u32> output_need_middle_buff_flag_(new u32[output_num], std::default_delete<u32[]>());
   u32* output_need_middle_buff_flag = output_need_middle_buff_flag_.get();
   #endif
-  if (arch != BM1682) {
+  if (arch == BM1684) {
     map<string, tensor_ext_t> *subnet_tensor_v;
     vector<tensor_attr_t> *input_v;
     vector<tensor_attr_t> *output_v;
@@ -427,7 +427,12 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
 
       bm_store_mode_t user_stmode = output_tensors[idx].st_mode;
       bm_store_mode_t stmode = output_v->at(tensor_ext.io_index).st_mode;
-      u64 middle_addr = bm_mem_get_device_addr(net_ctx->middlebuff_output[tensor_ext.io_index]);
+
+      u64 middle_addr = 0;
+      // only for bm1684
+      if(net_ctx->middlebuff_output.size()>output_num) {
+        middle_addr = bm_mem_get_device_addr(net_ctx->middlebuff_output[tensor_ext.io_index]);
+      }
       if (stmode == user_stmode || middle_addr == 0) {
         user_output_global_addr_middle[idx] = 0;
         output_need_middle_buff_flag[idx] = ST_NO_CHANGE;
@@ -444,14 +449,19 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
 
   u64 output_shape_global_addr = 0;
   if (output_num != 0) {
-    output_shape_global_addr = must_alloc_device_mem(devid, &output_shape_mem, output_num * sizeof(bm_shape_ex_t));
+    std::string suffix = (m_flags & BM_RUNTIME_SHARE_MEM) ? "" : "_" + std::to_string(dyn_core_mask);
+    uint64_t output_shape_size = output_num * sizeof(bm_shape_ex_t);
+    output_shape_global_addr = alloc_device_mem(devid, output_shape_mem, output_shape_size, "dynamic_out"+suffix, 1, false);
+    // output_shape_global_addr = must_alloc_device_mem(devid, &output_shape_mem, output_shape_size);
   }
 
-  auto core_list = get_core_list_from_core_mask(dyn_core_mask);
-  if (core_list.size() > 1) {
-    // ir only use one core to run
-    core_list.resize(1);
-  }
+  std::vector<int> core_list;
+  // ir only use one core to run
+  core_list.push_back(real_core_list[0]);
+  // if (core_list.size() > 1) {
+  //   // ir only use one core to run
+  //   core_list.resize(1);
+  // }
   if (arch == BM1682) {
     status = bmfunc::bmdnn_1682()->_bmdnn_dynamic_fullnet_v2_(
         m_handles[devid], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
@@ -484,9 +494,9 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
         m_handles[devid], func_ids[0], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
          ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
         user_input_shapes, input_elem_num, input_dims, output_num,
-        user_output_global_addrs, stage->ctx_start,
-        stage->ctx_borders, stage->ctx_offset,
-        stage->coeff_offset, stage->io_start, stage->io_offset, true,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, stage->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
         output_shape_global_addr, 
         net_ctx->do_allreduce == 1 ? &(net_ctx->allreduce_param) : NULL);
   } else if (arch == BM1688) {
@@ -495,9 +505,9 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
         m_handles[devid], func_ids, stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
          ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
         user_input_shapes, input_elem_num, input_dims, output_num,
-        user_output_global_addrs, stage->ctx_start,
-        stage->ctx_borders, (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->ctx_offset,
-        stage->coeff_offset, stage->io_start, stage->io_offset, true,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->dynamic_ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
         output_shape_global_addr,
         core_list);
   } else if (arch == BM1690) {
@@ -505,9 +515,9 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
         m_handles[devid], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
          ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
         user_input_shapes, input_elem_num, input_dims, output_num,
-        user_output_global_addrs, stage->ctx_start,
-        stage->ctx_borders,  (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->ctx_offset,
-        stage->coeff_offset, stage->io_start, stage->io_offset, true,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->dynamic_ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
         output_shape_global_addr,
         core_list);
   } else if (arch == MARS3) {
@@ -515,20 +525,29 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
         m_handles[devid], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
          ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
         user_input_shapes, input_elem_num, input_dims, output_num,
-        user_output_global_addrs, stage->ctx_start,
-        stage->ctx_borders, stage->ctx_offset,
-        stage->coeff_offset, stage->io_start, stage->io_offset, true,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, stage->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
+        output_shape_global_addr,
+        core_list);
+  } else if (arch == SGTPUV8) {
+    status = bmfunc::bmdnn_sgtpuv8()->_bmdnn_dynamic_fullnet_(
+        m_handles[devid], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
+         ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
+        user_input_shapes, input_elem_num, input_dims, output_num,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, stage->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
         output_shape_global_addr,
         core_list);
   } else if (arch == SG2380) {
-    auto func_ids = net_ctx->kernel_module_->get_dynamic_fullnet_func_id(core_list);
     status = bmfunc::bmdnn_2380()->_bmdnn_dynamic_fullnet_(
-        m_handles[devid], func_ids, stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
+        m_handles[devid], stage->core_commands[0].ir_mem.addr + subnet->tpu_info.core_commands[0].ir_offset,
          ((subnet->tpu_info.core_commands[0].ir_len + 3) / 4), input_num, user_input_global_addrs,
         user_input_shapes, input_elem_num, input_dims, output_num,
-        user_output_global_addrs, stage->ctx_start,
-        stage->ctx_borders, (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->ctx_offset,
-        stage->coeff_offset, stage->io_offset, true,
+        user_output_global_addrs, stage->dynamic_ctx_start,
+        stage->ctx_borders, (m_flags & BM_RUNTIME_SHARE_MEM) ? stage->dynamic_ctx_offset : net_ctx->dyn_neuron_stage_dict[dyn_core_mask]->dynamic_ctx_offset,
+        stage->dynamic_coeff_offset, stage->io_start, stage->io_offset, true,
         output_shape_global_addr,
         core_list);
   } else {
@@ -564,21 +583,31 @@ bool Bmruntime::launch_tpu_ir_subnet(net_ctx_t* net_ctx, net_stage_t* stage, con
     }
   }
 
-  must_free_device_mem(devid, output_shape_mem);
+  if (alloc_mem) {
+    free_device_mem(devid, output_shape_mem);
+  }
 
   return BM_SUCCESS == status;
 }
 
-/* TODO : refactor by launch_static */
 template <typename T_stage>
+void Bmruntime::get_tensor_attr(const T_stage *stage,
+    const vector<string> &tensor_name_v, vector<tensor_attr_t> &input_v) {
+  for (int idx = 0; idx < tensor_name_v.size(); ++idx) {
+    const auto &tensor_name = tensor_name_v.at(idx);
+    const tensor_ext_t &cmd_input = stage->subnet_tensor_v.find(tensor_name)->second;
+    input_v[idx].dev_mem = cmd_input.tensor_info.device_mem;
+    input_v[idx].pad_h = cmd_input.pad_h;
+    input_v[idx].shape = cmd_input.tensor_info.shape;
+    input_v[idx].st_mode = cmd_input.tensor_info.st_mode;
+  }
+}
+
 void Bmruntime::fill_tpu_tensor_info(
-    std::vector<tpu_tensor_info_t> &tensor_info, const T_stage *stage,
-    const SUBNET_INFO_T *subnet, const bm_tensor_t *user_tensors,
-    bool is_input) {
+    std::vector<tpu_tensor_info_t> &tensor_info, const vector<tensor_attr_t> &tensor_v,
+    const bm_tensor_t *user_tensors, bool is_input) {
   tensor_info.clear();
-  const auto &ref_tensors =
-      is_input ? subnet->input_tensor_name_v : subnet->output_tensor_name_v;
-  for (u32 idx = 0; idx < ref_tensors.size(); idx++) {
+  for (u32 idx = 0; idx < tensor_v.size(); idx++) {
     tpu_tensor_info_t info = {0};
     /// info that is given by users
     auto &user_input = user_tensors[idx];
@@ -591,20 +620,17 @@ void Bmruntime::fill_tpu_tensor_info(
         "user stmode[%d]:%d shouldn't be BM_STORE_2N\n", idx, info.user_stmode);
 
     /// info that fixed when compiling
-    const auto &tensor_name = ref_tensors.at(idx);
-    const auto &cmd_input = stage->subnet_tensor_v.find(tensor_name)->second;
-    info.compiled_stmode = cmd_input.tensor_info.st_mode;
+    auto &cmd_input = tensor_v[idx];
+    info.compiled_stmode = cmd_input.st_mode;
     info.padding_h = cmd_input.pad_h;
     info.compiled_global_addr =
-        bm_mem_get_device_addr(cmd_input.tensor_info.device_mem) +
-        GLOBAL_MEM_CMD_START_OFFSET;
+        bm_mem_get_device_addr(cmd_input.dev_mem) + GLOBAL_MEM_CMD_START_OFFSET;
 
     BMRT_ASSERT_INFO(info.compiled_stmode == BM_STORE_1N ||
                          info.compiled_stmode == BM_STORE_4N,
                      "user stmode[%d]:%d shouldn't be BM_STORE_2N\n", idx,
                      info.compiled_stmode);
-    const auto &ref_shape =
-        is_input ? user_input.shape : cmd_input.tensor_info.shape;
+    const auto &ref_shape = is_input ? user_input.shape : cmd_input.shape;
     info.n = ref_shape.dims[0];
     info.c = ref_shape.num_dims > 1 ? ref_shape.dims[1] : 1;
     info.h = ref_shape.num_dims > 2 ? ref_shape.dims[2] : 1;
@@ -617,22 +643,30 @@ void Bmruntime::fill_tpu_tensor_info(
     tensor_info.push_back(std::move(info));
   }
 }
+
+template <typename T_stage>
+void Bmruntime::fill_tpu_tensor_info(
+    std::vector<tpu_tensor_info_t> &tensor_info, const T_stage *stage,
+    const SUBNET_INFO_T *subnet, const bm_tensor_t *user_tensors,
+    bool is_input) {
+  const auto &ref_tensors =
+      is_input ? subnet->input_tensor_name_v : subnet->output_tensor_name_v;
+  std::vector<tensor_attr_t> tensor_attr_v(ref_tensors.size());
+  get_tensor_attr(stage, ref_tensors, tensor_attr_v);
+  return fill_tpu_tensor_info(tensor_info, tensor_attr_v, user_tensors, is_input);
+}
+
 void Bmruntime::fill_tpu_cmd_info(std::vector<tpu_cmd_info_t> &cmd_info,
-                                  const SUBNET_INFO_T *subnet,
+                                  const std::vector<single_core_command_t> &core_commands,
                                   const int32_t core_idx) {
   cmd_info.clear();
-  const size_t group_num =
-      subnet->tpu_info.core_commands[core_idx].bdc_id.size();
+  const size_t group_num = core_commands[core_idx].bdc_id.size();
   for (size_t group_idx = 0; group_idx < group_num; group_idx++) {
     tpu_cmd_info_t info = {0};
-    info.bdc_cmd_num =
-        subnet->tpu_info.core_commands[core_idx].bdc_id[group_idx];
-    info.gdma_cmd_num =
-        subnet->tpu_info.core_commands[core_idx].gdma_id[group_idx];
-    info.bdc_cmd_byte_size =
-        subnet->tpu_info.core_commands[core_idx].bdc_cmd_byte[group_idx];
-    info.gdma_cmd_byte_size =
-        subnet->tpu_info.core_commands[core_idx].gdma_cmd_byte[group_idx];
+    info.bdc_cmd_num = core_commands[core_idx].bdc_id[group_idx];
+    info.gdma_cmd_num = core_commands[core_idx].gdma_id[group_idx];
+    info.bdc_cmd_byte_size = core_commands[core_idx].bdc_cmd_byte[group_idx];
+    info.gdma_cmd_byte_size = core_commands[core_idx].gdma_cmd_byte[group_idx];
     cmd_info.push_back(std::move(info));
   }
 }
@@ -640,7 +674,7 @@ void Bmruntime::fill_tpu_cmd_info(std::vector<tpu_cmd_info_t> &cmd_info,
 bool Bmruntime::launch_tpu_subnet(net_ctx_t* net_ctx, net_stage_t* stage, const SUBNET_INFO_T* subnet,
                                   const bm_tensor_t* input_tensors, int input_num,
                                   bm_tensor_t* output_tensors, int output_num,
-                                  const uint32_t dyn_core_mask)
+                                  const std::vector<int32_t> &core_list, const uint32_t dyn_core_mask, bool force_sync)
 {
   auto devid = net_ctx->device_id;
   std::vector<tpu_tensor_info_t> input_info;
@@ -653,11 +687,11 @@ bool Bmruntime::launch_tpu_subnet(net_ctx_t* net_ctx, net_stage_t* stage, const 
     fill_tpu_tensor_info(output_info, net_ctx->dyn_neuron_stage_dict[dyn_core_mask], subnet, output_tensors, false);
   }
 
-  auto core_list = get_core_list_from_core_mask(dyn_core_mask);
+  // auto core_list = get_core_list_from_core_mask(dyn_core_mask);
   std::vector<tpu_single_core_cmd_t> core_command(core_list.size());
   for (size_t core_idx = 0; core_idx < core_list.size(); core_idx++) {
     std::vector<tpu_cmd_info_t> cmd_info;
-    fill_tpu_cmd_info(cmd_info, subnet, core_idx);
+    fill_tpu_cmd_info(cmd_info, subnet->tpu_info.core_commands, core_idx);
     core_command[core_idx].cmd_info = std::move(cmd_info);
     core_command[core_idx].bdc_cmd_addr =
         stage->core_commands[core_idx].bdc_mem.addr +
@@ -712,7 +746,8 @@ bool Bmruntime::launch_tpu_subnet(net_ctx_t* net_ctx, net_stage_t* stage, const 
 #endif
 
     bm_status_t status = bmfunc::bmdnn_base()->_bmdnn_multi_fullnet_(m_handles[devid], net_info);
-    if (BM_SUCCESS == status) {
+    bool need_sync = m_profile->is_enabled() | force_sync;
+    if (need_sync && BM_SUCCESS == status) {
       for (auto core_id : core_list) {
         bm_status_t core_status = bm_thread_sync_from_core(m_handles[devid], core_id);
         status = core_status == BM_SUCCESS ? status : core_status;
@@ -925,6 +960,7 @@ bool Bmruntime::launch_multi_subnet(
     int input_num,
     bm_tensor_t* output_tensors,
     int output_num,
+    const std::vector<int32_t> &core_list,
     const uint32_t dyn_core_mask)
 {
     int tensor_idx = 0;
@@ -1157,7 +1193,7 @@ bool Bmruntime::launch_multi_subnet(
             if (subnet->tpu_info.is_dynamic) {
                 ret = launch_tpu_ir_subnet(net_ctx, stage, subnet,
                                      subnet_input_tensors, subnet_input_elem_nums, subnet_input_num,
-                                     subnet_output_tensors, subnet_output_elem_nums, subnet_output_num, dyn_core_mask);
+                                     subnet_output_tensors, subnet_output_elem_nums, subnet_output_num, core_list, dyn_core_mask);
                 BMRT_ASSERT_INFO(ret == true, "launch_tpu_ir_subnet return false");
 
                 /* reshape output tensors */
@@ -1199,7 +1235,7 @@ bool Bmruntime::launch_multi_subnet(
                 ret = launch_tpu_subnet(net_ctx, stage, subnet,
                                         subnet_input_tensors, subnet_input_num,
                                         subnet_output_tensors, subnet_output_num,
-                                        dyn_core_mask);
+                                        core_list, dyn_core_mask, next_id >=0);
                 BMRT_ASSERT_INFO(ret == true, "launch_tpu_subnet return false");
             }
 

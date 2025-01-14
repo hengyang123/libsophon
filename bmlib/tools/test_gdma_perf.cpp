@@ -17,6 +17,8 @@
 #include <unistd.h>
 #else
 #pragma comment(lib, "libbmlib-static.lib")
+#include <io.h>
+EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 #endif
 
 #define TRANSFER_SIZE 1024*1024*64*8
@@ -79,14 +81,70 @@ static bool test_device_mem_range_valid(bm_handle_t handle, bm_device_mem_t mem)
   return true;
 }
 
+#ifdef _WIN32
+static int find_tpufirmware_path(char fw_path[512], const char* path){
+	char* ptr;
+	int dirname_len;
+	int ret = 0;
+
+	strcpy(fw_path, ".\\libbm1684x_kernel_module.so");
+
+	// test ./libbm1684x_kernel_module.so
+	ret = _access(fw_path,0);
+	if (ret == 0) {
+		return ret;
+	}
+
+	// test ./tpu_module/libbm1684x_kernel_module.so
+	LPTSTR strDLLPath1 = (char*)malloc(512);
+	GetModuleFileName((HINSTANCE)&__ImageBase, strDLLPath1, _MAX_PATH);
+
+	ptr = strrchr(strDLLPath1, '\\');
+
+	if (!ptr) {
+		printf("Invalid absolute path name of libbm1684x_kernel_module.so\n");
+		return -1;
+	}
+
+	dirname_len = strlen(strDLLPath1) - strlen(ptr) + 1;
+	if (dirname_len < 0) {
+		printf("Invalid length of folder name\n");
+		return -1;
+	}
+
+	memset(fw_path, 0, 512);
+	strncpy(fw_path, strDLLPath1, dirname_len);
+	strcat(fw_path, "tpu_module\\");
+	strcat(fw_path, path);
+
+	free(strDLLPath1);
+	ret = _access(fw_path, 0);
+	if (ret == 0) {
+		return ret;
+	}
+	return -1;
+}
+#endif
+
 bm_status_t test_memcpy_d2d_byte(bm_handle_t handle, bm_device_mem_t dst,
                                size_t dst_offset, bm_device_mem_t src,
                                size_t src_offset, size_t size) {
   bm_status_t ret = BM_SUCCESS;
   tpu_kernel_module_t bm_module;
   tpu_kernel_function_t f_id;
-  const char lib_path[80] = "/opt/sophon/libsophon-current/lib/tpu_module/libbm1684x_kernel_module.so";
+
+  #ifdef __linux__
+  const char key[64] = "memory_op.so";
+  const char lib_path[80] = "/opt/sophon/libsophon-current/lib/dyn_load/memory_op.so";
+  #else
   const char key[64] = "libbm1684x_kernel_module.so";
+  static char lib_path[512] = {0};
+  if (0 != find_tpufirmware_path(lib_path, key)) {
+	  printf("libbm1684x_kernel_module.so does not exist\n");
+	  return BM_ERR_FAILURE;
+  }
+  #endif
+
   int key_size = strlen(key);
 
   if (!test_device_mem_range_valid(handle, src)) {
@@ -99,16 +157,12 @@ bm_status_t test_memcpy_d2d_byte(bm_handle_t handle, bm_device_mem_t dst,
 
   bm_api_memcpy_byte_t api = {bm_mem_get_device_addr(src) + src_offset,
                               bm_mem_get_device_addr(dst) + dst_offset, size};
-#ifdef USING_CMODEL
-  if (fun_id != 0) {
-#else
-  if (handle->misc_info.chipid == 0x1686) {
+  if (bm_is_dynamic_loading(handle)) {
     bm_module = tpu_kernel_load_module_file_key(handle, lib_path, key, key_size);
     if(bm_module == NULL) {
         printf("bm_module is null!\n");
         return BM_ERR_FAILURE;
     }
-#endif
 
     f_id = tpu_kernel_get_function(handle, bm_module, "sg_api_memcpy_byte");
     bm_trace_enable(handle);

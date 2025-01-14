@@ -4,7 +4,7 @@
 #include "bmlib_device.h"
 #include "api.h"
 #include <unistd.h>
-
+#include <string.h>
 #define BM_API_QUIT                       0xffffffff
 
 INLINE static int pointer_wrap_around(u32 cur_pointer, int step, int len_bit_width) {
@@ -23,14 +23,22 @@ unsigned long long get_global_mem_size()
     if (env)
     {
         unsigned long long v;
+        size_t pos;
         try {
-            v = std::stoll(env);
+            if (env[0] == '0' && (env[1] == 'x' || env[1] == 'X')){
+              v = std::stoull(env, &pos, 16);
+            }
+            else {
+              v = std::stoull(env);
+            }
         } catch (std::invalid_argument &) {
             printf("invalid CMODEL_GLOBAL_MEM_SIZE \"%s\"\n", env);
             throw;
         }
-        printf("global mem size from env %lld\n", v);
-        return v;
+        if (pos != std::string::npos && pos == strlen(env)){
+          printf("global mem size from env %lld\n", v);
+          return v;
+        }
     } else {
         return 0x100000000;
     }
@@ -469,7 +477,10 @@ void bm_device::bm_device_arm_reserved_rel() {
   pthread_mutex_unlock(&arm_reserved_lock);
 }
 
+extern int fun_id;
 bm_status_t bm_device::bm_device_thread_sync_from_core(int core_idx) {
+  if(fun_id != 0) return BM_SUCCESS;
+
   thread_api_info *thd_api_info;
   thd_api_info = bm_get_thread_api_info(pthread_self(), core_idx);
   if (!thd_api_info) {
